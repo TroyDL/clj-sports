@@ -184,20 +184,74 @@
   (kc/belongs-to sql-season)
   (kc/belongs-to sql-league))
 
-(def index-map {:sports_idx "name"
-                :positions_idx "name"
-                :coaches_idx "id"})
+
+
+(def index-map {"sports_idx" "name"
+                "positions_idx" "name"
+                "coaches_idx" "id"})
 (defn query
   ([index-name]
      (pprint
       (map
        #(get-in % ["n" :data])
        (cy/tquery
-        (str "start n = node:" index-name "('"
-             (get index-map index-name) ":*') return n limit 10")))))
-  #_([index-name index-key return-keys]
-       (cy/tquery (str "start n = node:" index-name "('"
-                       index-key ":*') return" return-keys))))
+        (str "start n = node:" (str index-name) "('"
+             (index-map (str index-name)) ":*') return n limit 10")))))
+  ([index-name return-key]
+     (pprint
+      (cy/query
+       (str "start n = node:" (str index-name) "('"
+            (index-map (str index-name)) ":*') return n." (str return-key)))))
+  ([index-name index-value-like temp-arg]
+     (pprint
+      (map
+       #(get-in % ["n" :data])
+       (cy/tquery
+        (str "start n = node:" (str index-name) "('"
+             (index-map (str index-name)) ":*" (str index-value-like) "*')
+        return n limit 10"))))))
+
+(defn prototype1-text-query [key-name-str val-str]
+  (pprint (map #(get-in % ["n" :data])
+               (cy/tquery
+                (str "start n=node(*) where HAS (n." key-name-str
+                     ") AND n." key-name-str "=~ '(?i).*" val-str
+                     ".*' return n limit 20")))))
+
+(defn prototype2-text-query [key-name-str val-str]
+  (cy/query
+   (str "start n=node(*) where HAS (n." key-name-str
+        ") AND n." key-name-str "=~ '(?i).*" val-str
+        ".*' return n limit 2")))
+
+(defn text-query
+  ([key-name-str]
+     (text-query key-name-str "" 10 "(*)"))
+
+  ([key-name-str val-str]
+     (text-query key-name-str val-str 10 "(*)"))
+
+  ([key-name-str val-str limit-int]
+     (text-query key-name-str val-str limit-int "(*)"))
+
+  ([key-name-str val-str limit-int index-str]
+     (let [index-str
+           (if (not= index-str "(*)")
+             (str \: index-str "('" (index-map index-str) ":*')")
+             "(*)")]
+       (loop [curr-seq (:data (cy/query
+                               (format "start n=node%s where HAS (n.%s)
+                         AND n.%s=~ '(?i).*%s.*' return n limit %d"
+                                       index-str
+                                       key-name-str key-name-str
+                                       val-str limit-int))) res {}]
+         (if-let [curr (first (first curr-seq))]
+           (recur (rest curr-seq)
+                  (assoc res (second (str/split (:self curr) #"node/"))
+                         (:data curr)))
+           (do (pprint res)
+               (str (count res) " records found.")))))))
+
 
 (defn create-unique-index [name]
   (try (nn/create-index name {:unique true})
@@ -367,39 +421,6 @@
     (kc/belongs-to sql-team)
     (kc/belongs-to sql-season)
     (kc/belongs-to sql-league)))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#_(kc/select sql-player)
-
-
-
-
-
-
-
-
-
-
-
 
 
 
