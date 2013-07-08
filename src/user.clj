@@ -195,7 +195,8 @@
                 "seasons_idx" "season_id"
                 "leagues_idx" "league_id"
                 "teams_idx" "team_id"
-                "games_idx" "game_id"})
+                "games_idx" "game_id"
+                "actions_idx" "action_id"})
 
 (defn check-index
   "Helper for query function.  Formats an index
@@ -341,6 +342,15 @@
                                  (:id coach)
                                  coach))))
 
+(defn kill-player-nil [node]
+  (-> (update-in node [:season_id] str)
+      (update-in [:height] str)
+      (update-in [:weight] str)
+      (update-in [:jersey_number] str)
+      (update-in [:team_id] str)
+      (update-in [:pts_id] str)
+      (update-in [:firstname] (comp str/trim str))))
+
 (defn import-players []
     (create-unique-index "players_idx")
     (let [players-seq (kc/select sql-player-team-season
@@ -355,15 +365,6 @@
           (nn/create-unique-in-index "players_idx"
                                      :player_id (:player_id player')
                                      player')))))
-
-(defn kill-player-nil [node]
-  (-> (update-in node [:season_id] str)
-      (update-in [:height] str)
-      (update-in [:weight] str)
-      (update-in [:jersey_number] str)
-      (update-in [:team_id] str)
-      (update-in [:pts_id] str)
-      (update-in [:firstname] (comp str/trim str))))
 
 (defn import-schools []
   (create-unique-index "schools_idx")
@@ -429,7 +430,6 @@
             editor_notes (or editor_notes "")
             team1_host (or team1_host false)
             team2_host (or team2_host false)]
-        (println game_id)
         (nn/create-unique-in-index "games_idx"
                                    :game_id game_id
                                    {:game_id game_id
@@ -452,7 +452,6 @@
     (doseq [{:keys [score period team_id game_id]} scores]
       (let [team_node (nn/find-one "teams_idx" "team_id" team_id)
             game_node (nn/find-one "games_idx" "game_id" game_id)]
-        (print (str game_id " "))
         (nrl/create team_node game_node :scored_in {:score score
                                                     :period period})))))
 
@@ -462,7 +461,8 @@
                          (= :stat.stat_type_id :st.stat_type_id))
                 (kc/fields :stat_id :game_id :team_id :player1_id
                            :i1 :i2 :i3 :i4 :st.stat_name :st.int1_name
-                           :st.int2_name :st.int3_name :st.int4_name))]
+                           :st.int2_name :st.int3_name :st.int4_name)
+                (kc/limit 12000) (kc/offset 36000))]
     (doseq [{:keys [stat_id game_id team_id player1_id i1 i2 i3 i4
                     stat_name int1_name int2_name int3_name int4_name]}
             stats]
@@ -480,14 +480,124 @@
             team_node (nn/find-one "teams_idx" "team_id" team_id)
             game_node (nn/find-one "games_idx" "game_id" game_id)
             player_node (nn/find-one "players_idx" "player_id" player1_id)]
-        (print ".")
         (and game_node (nrl/create game_node stat_node :stat_in))
         (and team_node (nrl/create team_node stat_node :has_stat))
         (and player_node (nrl/create player_node stat_node :has_stat))))))
 
-#_(  select stat_id, game_id, team_id, player1_id, i1, i2, i3, i4, sport_id, stat_name, int1_name, int2_name, int3_name, int4_name
-  from stat left join stat_type on stat.stat_type_id = stat_type.stat_type_id;
-  )
+(defn import-actions []
+  (create-unique-index "actions_idx")
+  (let
+      [actions (kc/exec-raw
+        "select id, parent AS parent_id, game_id, team_id, player1_id,
+player1_name,player2_id, player2_name, period, value, failed, notes,
+score_type_name,score_type_point_value, action_type.action_type_id,
+action_type.parent_id AS action_type_parent_id, single_team_action,
+action_name, float_name FROM action LEFT JOIN (score_type, action_type)
+ON (action.score_type_id = score_type.score_type_id
+AND action.action_type_id = action_type.action_type_id)
+limit 20000, 30000;" :results)]
+    (doseq [{:keys [id parent_id action_name game_id
+                    team_id score_type_point_value
+                    score_type_name value float_name
+                    failed player1_id player1_name
+                    player2_id player2_name period
+                    notes single_team_action]} actions]
+      (let [parent_id (or parent_id -1)
+            player1_id (or player1_id -1)
+            player2_id (or player2_id -1)
+            player2_name (or player2_name "")
+            period (or period 0)
+            value (or value 0.0)
+            failed (or failed 0)
+            notes (or notes "")
+            float_name (or float_name "")
+            action_node (nn/create-unique-in-index
+                         "actions_idx" :action_id id
+                         {:action_id id :parent_id parent_id
+                          :action_name action_name :game_id game_id
+                          :team_id team_id
+                          :point_value score_type_point_value
+                          :score_type score_type_name :value value
+                          :value_unit float_name :failed failed
+                          :player1_id player1_id :player1_name player1_name
+                          :player2_id player2_id :player2_name player2_name
+                          :period period :notes notes
+                          :single_team_action single_team_action})
+            ;; 5 relationships self, team, game, p1, p2
+            team_node (nn/find-one "teams_idx" "team_id" team_id)
+            game_node (nn/find-one "games_idx" "game_id" game_id)
+            player1_node (nn/find-one "players_idx" "player_id" player1_id)
+            player2_node (nn/find-one "players_idx" "player_id" player2_id)
+            action_node_p (nn/find-one "actions_idx" "action_id" parent_id)]
+        (and game_node (nrl/create game_node action_node :had_action))
+        (and team_node (nrl/create team_node action_node :had_action))
+        (and player1_node (nrl/create player1_node action_node :initiated_action))
+        (and player2_node (nrl/create player2_node action_node :completed_action))
+        (and action_node_p (nrl/create action_node_p action_node :parent_action))
+        )))) 
+
+
+(defn import-coach-seasons []
+  (let [coach-seasons (kc/select sql-coach-team-season
+                        (kc/fields :coach_id, :team_id, :season_id,
+                                   :type))]
+    (doseq [{:keys [coach_id team_id season_id type]} coach-seasons]
+      (let [coach_node (nn/find-one "coaches_idx" "id" coach_id)
+            team_node (nn/find-one "teams_idx" "team_id" team_id)
+            season_node (nn/find-one "seasons_idx" "season_id" season_id)]
+        (and coach_node (nrl/create coach_node season_node :coached_in_season
+                                    {:type type}))
+        (and team_node (nrl/create coach_node team_node :coached_team_in
+                                   {:season_id season_id :type type}))))))
+
+
+(defn import-team-seasons []
+  (let [team-seasons (kc/select sql-team-season)]
+    (doseq [{:keys [team_id season_id league_id division]} team-seasons]
+      (let [team_node (nn/find-one "teams_idx" "team_id" team_id)
+            season_node (nn/find-one "seasons_idx" "season_id" season_id)
+            league_node (nn/find-one "leagues_idx" "league_id" league_id)
+            division (or division 0)]
+        (when team_node
+          (do (nrl/create team_node season_node :competed_in_season
+                          {:league_id league_id :division division})
+              (and league_node
+                   (nrl/create team_node league_node :competed_in_league
+                               {:division division
+                                :season_id season_id}))))))))
+
+(defn import-league-seasons []
+  (let [league-seasons (kc/select sql-league-season)]
+    (doseq [{:keys [sequence section_id season_id league_id]} league-seasons]
+      (let [sequence (or sequence -1)
+            season_node (nn/find-one "seasons_idx" "season_id" season_id)
+            league_node (nn/find-one "leagues_idx" "league_id" league_id)]
+        (and league_node
+             (and season_node
+                  (nrl/create league_node season_node :during_season
+                              {:sequence sequence
+                               :section_id section_id})))))))
+
+(defn import-player-team-and-positions []
+  "select player_team_season_position.id, position_id, player_id, team_id,
+season_id, jersey_number
+from player_team_season_position left join player_team_season
+on player_team_season_position.player_team_season_id = player_team_season.id;"
+  (let [player-positions
+        (kc/select sql-player-team-season-position
+          (kc/join sql-player-team-season
+                   (= :player_team_season_position.player_team_season_id
+                      :player_team_season.id))
+          (kc/fields :player_team_season_position.id :position_id
+                     :player_id :team_id :season_id :jersey_number)
+          (kc/limit 1))]
+    (doseq [{:keys [id position_id player_id team_id
+                    season_id jersey_number]} player-positions]
+      (let [jersey_number (or jersey_number -1)
+            player_node
+            position_node
+            team_node
+            season_node]))))
 
 
 
@@ -502,25 +612,27 @@
 
 
 
+#_(select id, parent AS parent_id, game_id, team_id, player1_id, player1_name,
+    player2_id, player2_name, period, value, failed, notes, score_type_name,
+    score_type_point_value, action_type.action_type_id, action_type.parent_id
+    AS action_type_parent_id, single_team_action, action_name, float_name
+    FROM action
+    LEFT JOIN (score_type, action_type)
+         ON (action.score_type_id = score_type.score_type_id
+             AND action.action_type_id = action_type.action_type_id))
 
-#_(def game-query
-  '(kc/select sql-game
-     (kc/with sql-game-type
-              (kc/fields :game_type_name))
-     (kc/join [(kc/subselect sql-matchup
-                             (kc/join [sql-matchup :m2]
-                                      (= :m2.game_id :matchup.game_id))
-                             (kc/where (not= :m2.team_id :matchup.team_id)) 
-                             (kc/fields :game_id
-                                        [:team_id :team1_id]
-                                        [:m2.team_id :team2_id])
-                             (kc/group :game_id)) :t2]
-              (= :game.game_id :t2.game_id))
-     (kc/fields :game_id :season_id
-                :sport_id :school_id :status :game_date
-                :summary :editor_notes :t2.team1_id
-                :t2.team2_id :game_type.game_type_name)
-     (kc/limit 2)))
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -546,16 +658,18 @@
 (kc/defentity sql-game-type done
 (kc/defentity sql-matchup done
 (kc/defentity sql-score done (as relations)
-(kc/defentity sql-score-type
-(kc/defentity sql-action
-(kc/defentity sql-action-type 
-(kc/defentity sql-action-type-score-type
-(kc/defentity sql-stat
-(kc/defentity sql-stat-type ---
+(kc/defentity sql-stat imported, done
+(kc/defentity sql-stat-type imported, done 
+(kc/defentity sql-score-type imported
+(kc/defentity sql-action imported
+(kc/defentity sql-action-type imported
+(kc/defentity sql-action-type-score-type imported
 (kc/defentity sql-coach-team-season
 (kc/defentity sql-player-team-season-position
 (kc/defentity sql-league-season
-(kc/defentity sql-team-season))))))))))))))))))))))
+(kc/defentity sql-team-season
+
+    ))))))))))))))))))))))
 
 #_((kc/defentity sql-sport)
   (kc/defentity sql-coach
